@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS focus_sessions (
+
+id SERIAL PRIMARY KEY,
+
+task VARCHAR(150),
+
+category VARCHAR(80),
+
+duration INTEGER,
+
+mood VARCHAR(50),
+
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+);
