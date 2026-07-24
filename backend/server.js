@@ -1,11 +1,11 @@
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config();
+const dotenv = require("dotenv")
 
 const sessionRoutes = require("./routes/sessions");
 
 const app = express();
-
+dotenv.config()
 app.use(cors());
 app.use(express.json());
 
