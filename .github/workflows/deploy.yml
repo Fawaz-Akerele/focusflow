@@ -1,27 +1,72 @@
-name: Deploy FocusFlow
+name: Zero-Downtime Blue-Green Deploy
+
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main" ]  # Deploy when you merge to main
+  workflow_dispatch:      # Manual trigger too
+
+env:
+  AZURE_WEBAPP_NAME: focusflow-app   # CHANGE THIS to your App Service name
+  AZURE_RESOURCE_GROUP: rg-focusflow # CHANGE THIS to your Resource Group
+  IMAGE_NAME: focusflow
+  CONTAINER_REGISTRY: fawazacr.azurecr.io  # CHANGE THIS to your ACR login server
+  STAGING_SLOT: staging  # This is your "Green" slot
+  PRODUCTION_SLOT: production # This is your "Blue" slot
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AZURE_VM_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.AZURE_VM_HOST }} >> ~/.ssh/known_hosts
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy to VM
+      - name: Login to ACR
+        run: az acr login --name ${{ env.CONTAINER_REGISTRY }}
+
+      - name: Build and Push Docker image
         run: |
-          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ${{ secrets.AZURE_VM_USER }}@${{ secrets.AZURE_VM_HOST }} << 'EOF'
-            cd ~/focusflow
-            git pull origin main
-            docker compose pull
-            docker compose up -d --build
-          EOF
+          docker build -t ${{ env.CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker push ${{ env.CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy to Staging Slot - Green
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          slot-name: ${{ env.STAGING_SLOT }}
+          images: ${{ env.CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Run Health Check on Staging
+        id: healthcheck
+        run: |
+          STAGING_URL="https://${{ env.AZURE_WEBAPP_NAME }}-${{ env.STAGING_SLOT }}.azurewebsites.net/health"
+          echo "Checking health at $STAGING_URL"
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" $STAGING_URL)
+            if [ "$STATUS" -eq 200 ]; then
+              echo "Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i failed. Retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 10 attempts"
+          exit 1
+
+      - name: Swap Staging to Production
+        if: success()
+        run: |
+          az webapp deployment slot swap \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name ${{ env.AZURE_WEBAPP_NAME }} \
+            --slot ${{ env.STAGING_SLOT }} \
+            --target-slot ${{ env.PRODUCTION_SLOT }}
+
+      - name: Rollback on Failure
+        if: failure() && steps.healthcheck.outcome == 'failure'
+        run: |
+          echo "Health
